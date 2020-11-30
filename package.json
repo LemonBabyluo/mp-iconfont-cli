@@ -34,8 +34,10 @@
     "css-tree": "^1.0.0-alpha.39",
     "inquirer": "^7.1.0",
     "mkdirp": "^1.0.4",
+    "node-stream-zip": "^1.11.6",
     "ora": "^4.0.3",
-    "puppeteer": "^2.1.1"
+    "puppeteer": "^2.1.1",
+    "rimraf": "^3.0.2"
   },
   "devDependencies": {
     "@types/configstore": "^4.0.0",

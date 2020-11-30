@@ -3,10 +3,12 @@ const fs = require('fs');
 const puppeteer = require('puppeteer');
 const ora = require('ora');
 const inquirer = require('inquirer');
+const rimraf = require('rimraf');
 const axios = require('axios');
 const csstree = require('css-tree');
 const mkdirp = require('mkdirp');
-
+const StreamZip = require('node-stream-zip');
+const { exec } = require('child_process')
 const CWD = process.cwd();
 const spinner = ora();
 const Configstore = require('configstore');
@@ -16,7 +18,15 @@ const GITHUB_ACCOUNT = 'githubAccount';
 const GITHUB_PASSWORD = 'githubPassword';
 const ICON_PROJECT_IDX = 'iconProjectIdx';
 const WXSS_SAVE_PATH = 'wxssSavePath';
+const DART_SAVE_PATH = 'dartSavePath';
+const TTF_SAVE_PATH = 'ttfSavePath';
+
 const WXSS_DEFAULT_RELATIVE_PATH = 'src/styles/iconfont.wxss';
+
+const ZIP_PATH = 'src/styles/';
+
+const ICONFONT_TTF_PATH = 'lib/app/assets/fonts/iconfont.ttf'
+const ICONFONT_DART_PATH = 'lib/app/uitls/icon_font.dart'
 
 async function updateIconfontMain() {
   spinner.start('正在初始化');
@@ -30,7 +40,8 @@ async function updateIconfontMain() {
     await gotoIconfontMyProjects(page);
     await getMyProjectList(page);
     const url = await getProjectUrl(page);
-    await saveWxssFile(url);
+    await downloadZipFile(page);
+    // await saveWxssFile(url);
   } catch (e) {
     spinner.stop();
     throw e;
@@ -213,6 +224,134 @@ async function getProjectUrl(page) {
   code = `https:${code}`;
   spinner.succeed('CSS 地址获取完毕');
   return code;
+}
+
+async function downloadZipFile(page) {
+  const managerBar = await page.waitForSelector('.project-manage-bar', { visible: true });
+  const downloadUrl = await managerBar.$eval('a[href^="/api/project/download.zip"]', el => el.href);
+  const cookies = await page.cookies();
+  let cookieKeyValueArr = [];
+  let cookieStr = '';
+  for(let i = 0; i < cookies.length; i++) {
+    cookieKeyValueArr.push(`${cookies[i].name}=${cookies[i].value}`)
+  }
+  cookieStr = cookieKeyValueArr.join(';')
+  spinner.start('正在下载 iconFont 压缩文件');
+  const res = await axios({
+    method: 'get',
+    url: downloadUrl,
+    headers: {
+      cookie: cookieStr,
+      'Content-Type': 'application/zip'
+    },
+    responseType: 'arraybuffer'
+  })
+  await mkdirp(path.dirname(ZIP_PATH));
+  const savePath = path.resolve(CWD, ZIP_PATH, 'iconfont.zip');
+  fs.writeFileSync(savePath, res.data);
+  spinner.succeed('iconFont 压缩文件下载完毕');
+
+  spinner.start('正在解压 iconFont.zip');
+  const zip = new StreamZip({
+    file: savePath,
+    storeEntries: true
+  });
+
+  // 把文件夹解压
+  zip.on('ready', (path, callback) => {
+     zip.extract(null, `${CWD}/${ZIP_PATH}`,  (err, count) => {
+       if(!err) {
+         spinner.succeed('iconFont.zip 解压完毕');
+         for (const entry of Object.values(zip.entries())) {
+           if(entry.isDirectory){
+             saveDartAndTtfFile(entry);
+             break;
+           }
+         }
+       }
+      zip.close();
+    });
+  });
+}
+
+async function saveDartAndTtfFile(entry) {
+  const saveCssContentPath = `${CWD}/${ZIP_PATH}${entry.name}`;
+  let cssContent = fs.readFileSync(`${saveCssContentPath}iconfont.css`,'utf8');
+  let content =  transferToDart(cssContent);
+  let dartSavePath = config.get(DART_SAVE_PATH);
+  if(!dartSavePath) {
+    console.log('2222');
+    const iconFontDartPathInput =  await inquirer.prompt({
+      type: 'input',
+      name: 'path',
+      message: '请输入保存 icon_font.dart 的地址：',
+      default: ICONFONT_DART_PATH
+    });
+
+    if(iconFontDartPathInput.path === '') {
+      iconFontDartPathInput.path = ICONFONT_DART_PATH;
+    }
+
+    dartSavePath = path.resolve(CWD, iconFontDartPathInput.path);
+    config.set(DART_SAVE_PATH, dartSavePath);
+
+    console.log('dartSavePath222: ', dartSavePath);
+  }
+  spinner.start('正在生成 icon_font.dart 文件');
+  await mkdirp(path.dirname(dartSavePath));
+  fs.writeFileSync(dartSavePath, content);
+  spinner.succeed('icon_font.dart 文件保存完毕');
+  spinner.info(`icon_font.dart 文件路径是：${dartSavePath}`);
+
+  let ttfContent = fs.readFileSync(`${saveCssContentPath}iconfont.ttf`);
+  let ttfSavePath = config.get(TTF_SAVE_PATH);
+  if(!ttfSavePath) {
+    const iconFontTtfPathInput = await inquirer.prompt({
+      type: 'input',
+      name: 'path',
+      message: '请输入保存 iconFont.ttf 的地址：',
+      default: ICONFONT_TTF_PATH
+    });
+
+    if(iconFontTtfPathInput.path === '') {
+      iconFontTtfPathInput.path = ICONFONT_TTF_PATH;
+    }
+
+    ttfSavePath = path.resolve(CWD, iconFontTtfPathInput.path);
+    config.set(TTF_SAVE_PATH, ttfSavePath);
+
+  }
+  spinner.start('正在保存 iconFont.ttf 文件');
+  await mkdirp(path.dirname(ttfSavePath));
+  fs.writeFileSync(ttfSavePath, ttfContent);
+  spinner.succeed('iconFont.ttf 文件保存完毕');
+  spinner.info(`iconFont.ttf 文件路径是：${ttfSavePath}`);
+  deleteZipFile();
+}
+
+function transferToDart(css){
+  let names = css.match(/(?<=\.).+(?=:before)/g);
+  let values = css.match(/(?<="\\)e[0-9a-zA-Z]{3}(?=";)/g);
+  let rawContent = "import 'package:flutter/widgets.dart';";
+  rawContent += "\nclass IconFont{";
+  rawContent += "\n\tstatic const String _family = 'iconfont';";
+  rawContent += "\n\tIconFont._();";
+
+  for(let i=0;i<names.length;i++){
+    let name = names[i].replace(/-/g,'_');
+    rawContent += "\n\tstatic const IconData "+name+" = IconData(0x"+values[i]+", fontFamily: _family);"
+  }
+
+  rawContent += "\n}";
+  return rawContent;
+}
+
+function deleteZipFile() {
+  // const savePath = path.resolve(CWD, ZIP_PATH, 'iconfont.zip');
+  // const savePath1 = `${CWD}/${ZIP_PATH}/${file}`;
+  // rimraf.sync(savePath);
+  // rimraf.sync(savePath1.substr(0, savePath1.length - 1));
+  rimraf.sync(ZIP_PATH);
 }
 
 async function saveWxssFile(url) {
